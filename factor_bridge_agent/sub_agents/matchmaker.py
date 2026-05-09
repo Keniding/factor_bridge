@@ -5,8 +5,8 @@ Dado el perfil de una factura (monto, plazo, pagador) o el perfil de un
 factor (apetito, ticket), encuentra contrapartes compatibles.
 """
 from google.adk.agents import LlmAgent
-from google.adk.models.lite_llm import LiteLlm
 
+from ..model_config import get_model
 from ..prompts import MATCHMAKER_INSTRUCTION
 from ..tools.matching_tools import match_invoice_to_factors
 from ..tools.platform_tools import query_platform_users
@@ -15,7 +15,7 @@ from ..tools.credit_tools import quick_risk_band
 
 matchmaker_agent = LlmAgent(
     name="matchmaker",
-    model=LiteLlm(model="openrouter/meta-llama/llama-3.3-70b-instruct:free", num_retries=6),
+    model=get_model(),
     description=(
         "Especialista en emparejar cedentes (vendedores de facturas) con "
         "factores (compradores) compatibles, respetando apetito de riesgo, "
