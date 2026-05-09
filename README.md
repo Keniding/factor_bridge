@@ -15,9 +15,8 @@ Conecta:
 |---|---|
 | Python | 3.10+ |
 | google-adk | 1.33.0 (con extensions para LiteLLM) |
-| Enrutador de modelos | OpenRouter (openrouter.ai) |
-| Modelo orquestador | `anthropic/claude-sonnet-4.6` |
-| Modelo sub-agentes | `anthropic/claude-sonnet-4.6` |
+| Seleccion de modelo | Variable `MODEL_PROVIDER` en `.env` |
+| Proveedores soportados | OpenRouter, Hugging Face |
 
 ---
 
@@ -102,6 +101,31 @@ factor_bridge/
 "Evalua la salud financiera del DNI 12345678 antes de comprar su factura."
 "Como funciona el factoring? Por que importa el pagador y no el cedente?"
 ```
+
+---
+
+## Estrategias de modelo
+
+El proveedor se controla con `MODEL_PROVIDER` en `factor_bridge_agent/.env`:
+
+| MODEL_PROVIDER | Modelo | Costo | Requisito |
+|---|---|---|---|
+| `openrouter` (default) | `llama-3.3-70b-instruct:free` | Gratis | `OPENROUTER_API_KEY` |
+| `openrouter_claude` | `claude-sonnet-4.6` | $3/M tokens | `OPENROUTER_API_KEY` + credito |
+| `huggingface` | `Llama-3.1-8B-Instruct` | Gratis | `HUGGINGFACE_API_KEY` |
+
+Para cambiar de proveedor sin reiniciar el codigo, edita `.env` y reinicia `adk`:
+
+```bash
+# .env
+MODEL_PROVIDER=huggingface
+HUGGINGFACE_API_KEY=hf_xxxxxxxxxxxxxxx
+```
+
+Token de HF: https://huggingface.co/settings/tokens (permiso: Inference API)
+
+La seleccion de modelo esta centralizada en `factor_bridge_agent/model_config.py`.
+El retry con backoff real (patch en `__init__.py`) aplica a todos los proveedores.
 
 ---
 

@@ -15,7 +15,7 @@ from google.adk.models.lite_llm import LiteLlm
 _MODELS = {
     "openrouter": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
     "openrouter_claude": "openrouter/anthropic/claude-sonnet-4.6",
-    "huggingface": "huggingface/meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "huggingface": "huggingface/meta-llama/Llama-3.1-8B-Instruct",  # tambien: Qwen/Qwen2.5-7B-Instruct
 }
 
 _DEFAULT_PROVIDER = "openrouter"
