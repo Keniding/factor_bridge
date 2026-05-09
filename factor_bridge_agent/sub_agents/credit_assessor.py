@@ -6,6 +6,7 @@ consolidado con banda de riesgo (VERDE/AMARILLO/ROJO).
 """
 from google.adk.agents import LlmAgent
 
+from ..model_config import get_model
 from ..prompts import CREDIT_ASSESSOR_INSTRUCTION
 from ..tools.identity_tools import validate_identity
 from ..tools.credit_tools import get_credit_profile, quick_risk_band
@@ -13,7 +14,7 @@ from ..tools.credit_tools import get_credit_profile, quick_risk_band
 
 credit_assessor_agent = LlmAgent(
     name="credit_assessor",
-    model="gemini-2.5-flash",
+    model=get_model(),
     description=(
         "Especialista en evaluación crediticia de pagadores peruanos. "
         "Dado un DNI o RUC, valida identidad (RENIEC/SUNAT) y devuelve un "

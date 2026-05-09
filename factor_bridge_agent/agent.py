@@ -10,9 +10,8 @@ Para levantarlo:
     adk api_server factor_bridge_agent  # FastAPI REST
 """
 from google.adk.agents import LlmAgent
-from google.adk.planners import BuiltInPlanner
-from google.genai import types
 
+from .model_config import get_model
 from .prompts import ROOT_AGENT_INSTRUCTION
 from .sub_agents.credit_assessor import credit_assessor_agent
 from .sub_agents.matchmaker import matchmaker_agent
@@ -25,11 +24,11 @@ from .tools.platform_tools import query_platform_users, register_intent
 
 
 # ---------------------------------------------------------------------
-# ROOT AGENT — Coordinador con razonamiento ReAct (thinking habilitado)
+# ROOT AGENT — Coordinador (modelo seleccionado por MODEL_PROVIDER)
 # ---------------------------------------------------------------------
 root_agent = LlmAgent(
     name="factor_bridge",
-    model="gemini-2.5-pro",
+    model=get_model(),
     description=(
         "FactorBridge — agente intermediario bilateral de factoring. "
         "Conecta cedentes (vendedores de facturas) con factores (compradores) "
@@ -53,15 +52,4 @@ root_agent = LlmAgent(
         query_platform_users,
         register_intent,
     ],
-
-    # Planner ReAct: habilita el "thinking" nativo de Gemini 2.5 para que
-    # el modelo razone explícitamente Thought→Action→Observation→Reflection
-    # antes de cada decisión. include_thoughts=True permite ver el
-    # razonamiento en la UI de adk web (clave para auditoría fintech).
-    planner=BuiltInPlanner(
-        thinking_config=types.ThinkingConfig(
-            include_thoughts=True,
-            thinking_budget=4096,
-        ),
-    ),
 )
