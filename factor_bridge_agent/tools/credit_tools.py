@@ -1,9 +1,9 @@
 """
-Herramientas de evaluación crediticia (scoring tipo SBS / Infocorp / Sentinel).
+Herramientas de evaluacion crediticia (scoring tipo SBS / Infocorp / Sentinel).
 
-NOTA: Las APIs reales de SBS e Infocorp son de pago y requieren convenios.
-Este módulo provee un perfil simulado realista para desarrollo, con
-ganchos claros para enchufar el proveedor real más adelante.
+Fuente primaria: tabla `credit_scores` en Supabase.
+Para documentos sin perfil precargado se calcula un score determinista
+(desarrollo) hasta que se integre un buro real.
 """
 from __future__ import annotations
 
@@ -13,41 +13,69 @@ from typing import Any
 
 from google.adk.tools import ToolContext
 
+from ..db import get_conn
+
 
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
-def _deterministic_score(document: str) -> int:
-    """Genera un score determinista entre 300 y 850 a partir del documento.
-    Usa SHA-256 para que el mismo documento siempre devuelva el mismo score
-    durante el desarrollo."""
+def _db_lookup_score(numero: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT score, banda_riesgo, morosidad_activa, lista_negra_sbs, "
+                "sunat_no_habido, deuda_pen, dias_mora, fuente "
+                "FROM credit_scores WHERE numero = %s",
+                (numero,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "score": row[0], "banda_riesgo": row[1], "morosidad_activa": row[2],
+        "lista_negra_sbs": row[3], "sunat_no_habido": row[4],
+        "deuda_pen": float(row[5]), "dias_mora": row[6], "fuente": row[7],
+    }
+
+
+def _computed_score(document: str, sunat_no_habido: bool) -> dict[str, Any]:
+    """Score determinista para documentos sin perfil en DB (solo desarrollo)."""
     h = int(hashlib.sha256(document.encode()).hexdigest(), 16)
-    return 300 + (h % 551)  # rango 300..850
+    score = 300 + (h % 551)
+    blacklist = document.endswith("9")
+    morosidad = score < 600 or blacklist
 
-
-def _classify_band(score: int, sunat_no_habido: bool, blacklist: bool) -> str:
     if blacklist or sunat_no_habido or score < 550:
-        return "ROJO"
-    if score < 700:
-        return "AMARILLO"
-    return "VERDE"
+        banda = "ROJO"
+    elif score < 700:
+        banda = "AMARILLO"
+    else:
+        banda = "VERDE"
+
+    return {
+        "score": score, "banda_riesgo": banda,
+        "morosidad_activa": morosidad, "lista_negra_sbs": blacklist,
+        "sunat_no_habido": sunat_no_habido,
+        "deuda_pen": round((850 - score) * 12.5, 2) if morosidad else 0.0,
+        "dias_mora": (850 - score) // 10 if morosidad else 0,
+        "fuente": "algoritmo-determinista",
+    }
 
 
 def get_credit_profile(document: str, tool_context: ToolContext) -> dict[str, Any]:
     """Obtiene el perfil crediticio consolidado de un DNI o RUC peruano.
 
-    Consulta (mock para desarrollo) burós tipo SBS, Infocorp y Sentinel,
-    y devuelve un score 300-850, indicadores de morosidad activa, lista
-    negra, y banda de riesgo (VERDE/AMARILLO/ROJO).
+    Consulta la tabla credit_scores en Supabase. Si el documento no tiene
+    perfil precargado calcula un score determinista (solo para desarrollo).
 
-    Úsala SOLO después de `validate_identity`.
+    Usala SOLO despues de validate_identity.
 
     Args:
-        document: DNI (8 dígitos) o RUC (11 dígitos) ya validado.
+        document: DNI (8 digitos) o RUC (11 digitos) ya validado.
 
     Returns:
-        dict con score, banda de riesgo, morosidad, fuentes y timestamp.
+        dict con score, banda de riesgo, morosidad, fuente y timestamp.
     """
     document = document.strip()
     identity = tool_context.state.get(f"identity:{document}")
@@ -64,41 +92,40 @@ def get_credit_profile(document: str, tool_context: ToolContext) -> dict[str, An
     sunat_condicion = (identity.get("condicion") or "").upper()
     sunat_no_habido = sunat_condicion == "NO HABIDO"
 
-    score = _deterministic_score(document)
+    try:
+        cs = _db_lookup_score(document)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"Error consultando credit_scores en Supabase: {exc}",
+            "documento": document,
+            "timestamp": _now_iso(),
+        }
 
-    # Heurística mock: documentos terminados en 9 → blacklist
-    blacklist = document.endswith("9")
-    morosidad_activa = score < 600 or blacklist
-
-    band = _classify_band(score, sunat_no_habido, blacklist)
+    if cs is None:
+        cs = _computed_score(document, sunat_no_habido)
 
     profile = {
         "status": "ok",
+        "fuente": cs["fuente"],
         "documento": document,
-        "score": score,
-        "score_provider": "InfocorpMock v1",
-        "morosidad_activa": morosidad_activa,
-        "lista_negra_sbs": blacklist,
-        "sunat_no_habido": sunat_no_habido,
-        "banda_riesgo": band,
-        "deuda_estimada_pen": round((850 - score) * 12.5, 2) if morosidad_activa else 0.0,
-        "dias_mora_promedio": (850 - score) // 10 if morosidad_activa else 0,
-        "fuentes_consultadas": ["SUNAT", "InfocorpMock", "SBS-blacklist-mock"],
+        "score": cs["score"],
+        "morosidad_activa": cs["morosidad_activa"],
+        "lista_negra_sbs": cs["lista_negra_sbs"],
+        "sunat_no_habido": cs["sunat_no_habido"],
+        "banda_riesgo": cs["banda_riesgo"],
+        "deuda_estimada_pen": cs["deuda_pen"],
+        "dias_mora_promedio": cs["dias_mora"],
         "timestamp": _now_iso(),
-        "disclaimer": (
-            "Datos de scoring son simulados con fines de desarrollo. "
-            "En producción reemplazar con integración Equifax/Sentinel/SBS."
-        ),
     }
 
-    # Guardamos perfil en sesión para que el matchmaker lo lea sin re-consultar
     tool_context.state[f"credit:{document}"] = profile
     return profile
 
 
 def quick_risk_band(document: str, tool_context: ToolContext) -> dict[str, Any]:
-    """Atajo: devuelve solo la banda de riesgo (VERDE/AMARILLO/ROJO) si ya
-    se evaluó al pagador en esta sesión, o ejecuta la evaluación completa.
+    """Atajo: devuelve solo la banda de riesgo si ya se evaluo al pagador
+    en esta sesion, o ejecuta la evaluacion completa.
 
     Args:
         document: DNI o RUC del pagador.
@@ -118,5 +145,5 @@ def quick_risk_band(document: str, tool_context: ToolContext) -> dict[str, Any]:
     return {
         "status": "not_evaluated",
         "documento": document,
-        "mensaje": "Aún no se evaluó al pagador. Llama a get_credit_profile.",
+        "mensaje": "Aun no se evaluo al pagador. Llama a get_credit_profile.",
     }
