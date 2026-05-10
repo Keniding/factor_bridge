@@ -185,7 +185,7 @@ Dado un DNI o RUC, devolver un perfil consolidado con:
   "morosidad_activa": false,
   "lista_negra": false,
   "banda_riesgo": "VERDE",
-  "fuentes_consultadas": ["RENIEC", "SUNAT", "InfocorpMock"],
+  "fuentes_consultadas": ["RENIEC", "SUNAT", "Supabase"],
   "timestamp": "2026-05-09T...",
   "justificacion": "..."
 }

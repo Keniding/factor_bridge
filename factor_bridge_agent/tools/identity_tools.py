@@ -1,8 +1,9 @@
 """
-Herramientas de validación de identidad: RUC (SUNAT) y DNI (RENIEC).
+Herramientas de validacion de identidad: RUC (SUNAT) y DNI (RENIEC).
 
-Usa apis.net.pe / decolecta.com si hay token. Caso contrario retorna mocks
-para que el agente pueda probarse sin credenciales externas.
+Fuente primaria: tabla `documentos` en Supabase.
+Si el documento no esta en la tabla se consulta apis.net.pe (requiere token)
+y el resultado se persiste en Supabase para futuras consultas.
 """
 from __future__ import annotations
 
@@ -13,8 +14,9 @@ from typing import Any
 import httpx
 from google.adk.tools import ToolContext
 
+from ..db import get_conn
 
-# --------------------------------------------------------------------- helpers
+
 def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
@@ -27,54 +29,57 @@ def _is_valid_ruc(doc: str) -> bool:
     return doc.isdigit() and len(doc) == 11 and doc[:2] in ("10", "15", "16", "17", "20")
 
 
-# --------------------------------------------------------------------- mocks
-_MOCK_RUC_DB: dict[str, dict[str, Any]] = {
-    "20512345678": {
-        "razon_social": "DISTRIBUIDORA SAN MARTIN S.A.C.",
-        "estado": "ACTIVO",
-        "condicion": "HABIDO",
-        "direccion": "AV. JAVIER PRADO ESTE 1234, SAN ISIDRO, LIMA",
-        "actividad": "Comercio al por mayor",
-    },
-    "20601030013": {
-        "razon_social": "REXTIE S.A.C.",
-        "estado": "ACTIVO",
-        "condicion": "HABIDO",
-        "direccion": "AV. LARCO 345, MIRAFLORES, LIMA",
-        "actividad": "Servicios financieros",
-    },
-    "20999999999": {
-        "razon_social": "EMPRESA MOROSA S.A.",
-        "estado": "ACTIVO",
-        "condicion": "NO HABIDO",
-        "direccion": "DESCONOCIDA",
-        "actividad": "No declarada",
-    },
-}
-
-_MOCK_DNI_DB: dict[str, dict[str, Any]] = {
-    "12345678": {
-        "nombres": "JUAN ALBERTO",
-        "apellido_paterno": "PEREZ",
-        "apellido_materno": "GARCIA",
-    },
-    "87654321": {
-        "nombres": "MARIA DEL CARMEN",
-        "apellido_paterno": "RODRIGUEZ",
-        "apellido_materno": "LOPEZ",
-    },
-}
+def _db_lookup(numero: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT numero, tipo, nombre, estado, condicion, direccion, actividad, fuente "
+                "FROM documentos WHERE numero = %s",
+                (numero,),
+            )
+            row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "numero": row[0], "tipo": row[1], "nombre": row[2],
+        "estado": row[3], "condicion": row[4], "direccion": row[5],
+        "actividad": row[6], "fuente": row[7],
+    }
 
 
-# --------------------------------------------------------------------- tools
+def _db_upsert(
+    numero: str, tipo: str, nombre: str, fuente: str,
+    estado: str | None = None, condicion: str | None = None,
+    direccion: str | None = None, actividad: str | None = None,
+) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO documentos (numero, tipo, nombre, estado, condicion, direccion, actividad, fuente, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (numero) DO UPDATE SET
+                    nombre = EXCLUDED.nombre,
+                    estado = EXCLUDED.estado,
+                    condicion = EXCLUDED.condicion,
+                    direccion = EXCLUDED.direccion,
+                    actividad = EXCLUDED.actividad,
+                    fuente = EXCLUDED.fuente,
+                    updated_at = NOW()
+                """,
+                (numero, tipo, nombre, estado, condicion, direccion, actividad, fuente),
+            )
+
+
 def validate_identity(document: str, tool_context: ToolContext) -> dict[str, Any]:
-    """Valida un documento peruano (DNI de 8 dígitos o RUC de 11 dígitos)
-    contra fuentes oficiales (RENIEC para DNI, SUNAT para RUC).
+    """Valida un documento peruano (DNI de 8 digitos o RUC de 11 digitos)
+    contra la base de datos Supabase (fuente primaria) o RENIEC/SUNAT via
+    apis.net.pe si el documento aun no esta registrado.
 
-    Úsala como PRIMER paso antes de cualquier evaluación crediticia.
+    Usala como PRIMER paso antes de cualquier evaluacion crediticia.
 
     Args:
-        document: número de documento. DNI = 8 dígitos. RUC = 11 dígitos.
+        document: numero de documento. DNI = 8 digitos. RUC = 11 digitos.
 
     Returns:
         dict con status, tipo de documento (DNI/RUC), datos identitarios,
@@ -89,19 +94,27 @@ def validate_identity(document: str, tool_context: ToolContext) -> dict[str, Any
 
     return {
         "status": "error",
-        "error": "Documento inválido. DNI debe tener 8 dígitos numéricos; "
-                 "RUC debe tener 11 dígitos comenzando en 10/15/16/17/20.",
+        "error": "Documento invalido. DNI debe tener 8 digitos numericos; "
+                 "RUC debe tener 11 digitos comenzando en 10/15/16/17/20.",
         "documento": document,
         "timestamp": _now_iso(),
     }
 
 
 def _validate_ruc(ruc: str, tool_context: ToolContext) -> dict[str, Any]:
-    token = os.getenv("APIS_NET_PE_TOKEN")
-    source = "MOCK"
-    data: dict[str, Any] | None = None
+    row = _db_lookup(ruc)
 
-    if token:
+    if row is None:
+        token = os.getenv("APIS_NET_PE_TOKEN")
+        if not token:
+            return {
+                "status": "not_found",
+                "tipo": "RUC",
+                "documento": ruc,
+                "mensaje": f"RUC {ruc} no encontrado en la base de datos. "
+                           "Agregalo en Supabase tabla `documentos` o configura APIS_NET_PE_TOKEN.",
+                "timestamp": _now_iso(),
+            }
         try:
             r = httpx.get(
                 "https://api.apis.net.pe/v2/sunat/ruc",
@@ -109,55 +122,64 @@ def _validate_ruc(ruc: str, tool_context: ToolContext) -> dict[str, Any]:
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
-            if r.status_code == 200:
-                data = r.json()
-                source = "apis.net.pe (SUNAT)"
-        except httpx.HTTPError:
-            data = None
-
-    if data is None:
-        mock = _MOCK_RUC_DB.get(ruc)
-        if mock is None:
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPError as exc:
             return {
-                "status": "not_found",
-                "documento": ruc,
+                "status": "error",
                 "tipo": "RUC",
-                "mensaje": f"RUC {ruc} no encontrado en padrón consultado.",
-                "fuente": source,
+                "documento": ruc,
+                "error": f"Error consultando SUNAT: {exc}",
                 "timestamp": _now_iso(),
             }
-        data = {
-            "numeroDocumento": ruc,
-            "razonSocial": mock["razon_social"],
-            "estado": mock["estado"],
-            "condicion": mock["condicion"],
-            "direccion": mock["direccion"],
-            "actividad": mock["actividad"],
-        }
 
-    # Persistimos en estado de sesión para uso por otros tools/sub-agents
-    tool_context.state[f"identity:{ruc}"] = data
+        nombre = data.get("razonSocial", "")
+        _db_upsert(
+            numero=ruc, tipo="RUC", nombre=nombre,
+            estado=data.get("estado"), condicion=data.get("condicion"),
+            direccion=data.get("direccion"), actividad=data.get("ciiu"),
+            fuente="apis.net.pe",
+        )
+        row = _db_lookup(ruc)
+
+    identity_data = {
+        "numeroDocumento": ruc,
+        "razonSocial": row["nombre"],
+        "estado": row["estado"],
+        "condicion": row["condicion"],
+        "direccion": row["direccion"],
+        "actividad": row["actividad"],
+    }
+    tool_context.state[f"identity:{ruc}"] = identity_data
 
     return {
         "status": "ok",
         "tipo": "RUC",
         "documento": ruc,
-        "razon_social": data.get("razonSocial") or data.get("razon_social"),
-        "estado_sunat": data.get("estado"),
-        "condicion_sunat": data.get("condicion"),
-        "direccion": data.get("direccion"),
-        "actividad": data.get("actividad", "No disponible"),
-        "fuente": source,
+        "razon_social": row["nombre"],
+        "estado_sunat": row["estado"],
+        "condicion_sunat": row["condicion"],
+        "direccion": row["direccion"],
+        "actividad": row["actividad"] or "No disponible",
+        "fuente": row["fuente"],
         "timestamp": _now_iso(),
     }
 
 
 def _validate_dni(dni: str, tool_context: ToolContext) -> dict[str, Any]:
-    token = os.getenv("APIS_NET_PE_TOKEN")
-    source = "MOCK"
-    data: dict[str, Any] | None = None
+    row = _db_lookup(dni)
 
-    if token:
+    if row is None:
+        token = os.getenv("APIS_NET_PE_TOKEN")
+        if not token:
+            return {
+                "status": "not_found",
+                "tipo": "DNI",
+                "documento": dni,
+                "mensaje": f"DNI {dni} no encontrado en la base de datos. "
+                           "Agregalo en Supabase tabla `documentos` o configura APIS_NET_PE_TOKEN.",
+                "timestamp": _now_iso(),
+            }
         try:
             r = httpx.get(
                 "https://api.apis.net.pe/v2/reniec/dni",
@@ -165,41 +187,33 @@ def _validate_dni(dni: str, tool_context: ToolContext) -> dict[str, Any]:
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=10.0,
             )
-            if r.status_code == 200:
-                data = r.json()
-                source = "apis.net.pe (RENIEC)"
-        except httpx.HTTPError:
-            data = None
-
-    if data is None:
-        mock = _MOCK_DNI_DB.get(dni)
-        if mock is None:
+            r.raise_for_status()
+            data = r.json()
+        except httpx.HTTPError as exc:
             return {
-                "status": "not_found",
-                "documento": dni,
+                "status": "error",
                 "tipo": "DNI",
-                "mensaje": f"DNI {dni} no encontrado.",
-                "fuente": source,
+                "documento": dni,
+                "error": f"Error consultando RENIEC: {exc}",
                 "timestamp": _now_iso(),
             }
-        data = {
-            "numeroDocumento": dni,
-            **mock,
-        }
 
-    nombre_completo = " ".join(filter(None, [
-        data.get("nombres"),
-        data.get("apellidoPaterno") or data.get("apellido_paterno"),
-        data.get("apellidoMaterno") or data.get("apellido_materno"),
-    ]))
+        nombre = " ".join(filter(None, [
+            data.get("nombres"),
+            data.get("apellidoPaterno"),
+            data.get("apellidoMaterno"),
+        ]))
+        _db_upsert(numero=dni, tipo="DNI", nombre=nombre, fuente="apis.net.pe")
+        row = _db_lookup(dni)
 
-    tool_context.state[f"identity:{dni}"] = data
+    identity_data = {"numeroDocumento": dni, "nombreCompleto": row["nombre"]}
+    tool_context.state[f"identity:{dni}"] = identity_data
 
     return {
         "status": "ok",
         "tipo": "DNI",
         "documento": dni,
-        "nombre_completo": nombre_completo,
-        "fuente": source,
+        "nombre_completo": row["nombre"],
+        "fuente": row["fuente"],
         "timestamp": _now_iso(),
     }
